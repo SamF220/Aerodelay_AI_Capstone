@@ -1,0 +1,7 @@
+gradio
+joblib
+shap
+requests
+numpy
+pandas
+scikit-learn==1.6.1
