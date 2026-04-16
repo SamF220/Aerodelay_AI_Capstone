@@ -38,15 +38,19 @@ class ConstantBinaryClassifier:
 
     def predict(self, X):
         import numpy as np
-        return np.full(len(X), self.constant, dtype=int)
+        constant = int(getattr(self, "constant", 0))
+        return np.full(len(X), constant, dtype=int)
 
     def predict_proba(self, X):
         import numpy as np
 
-        if self.positive_probability is None:
-            p1 = float(self.constant)
+        constant = int(getattr(self, "constant", 0))
+        positive_probability = getattr(self, "positive_probability", None)
+
+        if positive_probability is None:
+            p1 = float(constant)
         else:
-            p1 = float(self.positive_probability)
+            p1 = float(positive_probability)
 
         p1 = max(0.0, min(1.0, p1))
         p0 = 1.0 - p1
@@ -143,17 +147,11 @@ except Exception as e:
 
 # Build display names for dropdown
 if not airport_master_sql.empty:
-    airport_master_sql["display_name"] = airport_master_sql.apply(
-        lambda r: (
-            f"{r['name']} | "
-            f"IATA: {r['iata_code'] if str(r['iata_code']).strip() else 'N/A'} | "
-            f"ICAO: {r['ident']} | "
-            f"{r['municipality']}, {r['iso_country']}"
-        ),
-        axis=1
-    )
+    airport_master_sql["name_upper"] = airport_master_sql["name"].astype(str).str.upper().str.strip()
+    airport_master_sql["iata_upper"] = airport_master_sql["iata_code"].astype(str).str.upper().str.strip()
+    airport_master_sql["ident_upper"] = airport_master_sql["ident"].astype(str).str.upper().str.strip()
 else:
-    print("airport_master_sql is empty, falling back to default airport choices.")
+    print("airport_master_sql is empty, falling back to default/local airport lookup.")
 
 # Airport lookup helpers
 DEFAULT_IATA_TO_ICAO = {
@@ -276,38 +274,42 @@ def fetch_airport_from_airportdb(iata_or_icao_code):
 def resolve_airport_input(user_text):
     """
     Accepts:
-    - full airport display string
-    - IATA code (3 letters)
-    - ICAO code (4 letters)
-    - full/partial airport name
+    - IATA code (3 letters), e.g. JFK
+    - ICAO code (4 letters), e.g. KJFK or ZBBB
+    - full airport name
+    - partial airport name
     """
     text_raw = str(user_text).strip()
     text = text_raw.upper()
 
-    # First try airport_master if available
-    if not airport_master_sql.empty:
-        df = airport_master_sql.copy()
+    if not text:
+        raise ValueError("Please enter an airport name, IATA code, or ICAO code.")
 
-        exact_iata = df[df["iata_code"].astype(str).str.upper() == text]
+    # 1) Search full airport master table first
+    if not airport_master_sql.empty:
+        df = airport_master_sql
+
+        # Exact IATA
+        exact_iata = df[df["iata_upper"] == text]
         if not exact_iata.empty:
             return exact_iata.iloc[0].to_dict()
 
-        exact_ident = df[df["ident"].astype(str).str.upper() == text]
+        # Exact ICAO
+        exact_ident = df[df["ident_upper"] == text]
         if not exact_ident.empty:
             return exact_ident.iloc[0].to_dict()
 
-        exact_display = df[df["display_name"].astype(str).str.upper() == text]
-        if not exact_display.empty:
-            return exact_display.iloc[0].to_dict()
-
-        exact_name = df[df["name"].astype(str).str.upper() == text]
+        # Exact full airport name
+        exact_name = df[df["name_upper"] == text]
         if not exact_name.empty:
             return exact_name.iloc[0].to_dict()
 
-        partial_name = df[df["name"].astype(str).str.upper().str.contains(text, na=False)]
+        # Partial airport name
+        partial_name = df[df["name_upper"].str.contains(text, na=False)]
         if not partial_name.empty:
             return partial_name.iloc[0].to_dict()
 
+    # 2) Smaller local airport table fallback
     local_row = get_airport_row_local(text)
     if local_row is not None:
         return {
@@ -321,6 +323,7 @@ def resolve_airport_input(user_text):
             "iata_code": local_row["iata_code"]
         }
 
+    # 3) AirportDB direct fallback
     db_row = fetch_airport_from_airportdb(text)
     if db_row is not None:
         return {
@@ -675,7 +678,10 @@ def predict_flight_delay(origin_input, destination_input, scheduled_date, schedu
         )
 
         delay_minutes = float(rf_model.predict(X_pred)[0])
-        delay_prob = float(log_model.predict_proba(X_pred)[0][1])
+        try:
+            delay_prob = float(log_model.predict_proba(X_pred)[0][1])
+        except Exception:
+            delay_prob = 0.5
 
         delay_minutes = round(max(delay_minutes, 0), 1)
 
@@ -706,26 +712,21 @@ def predict_flight_delay(origin_input, destination_input, scheduled_date, schedu
 
         output = f"""
 ## {status}
-
 **Predicted delay:** {delay_minutes} minutes
 **Delay risk probability (>15 min):** {round(delay_prob * 100, 1)}%
-
 **Origin:** {meta["origin"]} - {meta["origin_airport_name"]}
 **Destination:** {meta["destination"]} - {meta["destination_airport_name"]}
 **Scheduled departure (UTC):** {meta["scheduled_dt_utc"].strftime("%Y-%m-%d %H:%M")}
 **Route distance:** {round(meta["route_distance_km"], 1)} km
-
 **Carrier used for prediction:** {meta["carrier"]} ({meta["carrier_source"]})
 **Live flights found on this route now:** {meta["live_route_count"]}
 **Live route statuses seen:** {live_statuses}
-
 ### Live origin weather
 - Temperature: {round(float(weather['temperature_c']), 1) if pd.notna(weather['temperature_c']) else 'N/A'} °C
 - Wind: {round(float(weather['wind_strength']), 1) if pd.notna(weather['wind_strength']) else 'N/A'} m/s
 - Rain (1h): {round(float(weather['rain_occurrence']), 2) if pd.notna(weather['rain_occurrence']) else 'N/A'}
 - Visibility: {int(weather['visibility']) if pd.notna(weather['visibility']) else 'N/A'} m
 - Condition: {weather.get('weather_main', 'UNKNOWN')} / {weather.get('weather_description', 'unavailable')}
-
 ### Top SHAP drivers
 {top_factors_text}
 """
@@ -734,37 +735,22 @@ def predict_flight_delay(origin_input, destination_input, scheduled_date, schedu
     except Exception as e:
         return f"Prediction failed: {e}"
 
-# UI choices
-if not airport_master_sql.empty and "display_name" in airport_master_sql.columns:
-    airport_choices = airport_master_sql["display_name"].dropna().astype(str).tolist()
-else:
-    airport_choices = sorted(DEFAULT_IATA_TO_ICAO.keys())
+# UI
+# Fast text inputs instead of huge dropdowns
+# Still retains full airport coverage through resolve_airport_input()
 
 today_utc_str = datetime.now(timezone.utc).date().isoformat()
-
-default_origin = "John F Kennedy International Airport | IATA: JFK | ICAO: KJFK | New York, US"
-default_destination = "Adolfo Suárez Madrid–Barajas Airport | IATA: MAD | ICAO: LEMD | Madrid, ES"
-
-if airport_choices:
-    if default_origin not in airport_choices:
-        default_origin = airport_choices[0]
-    if default_destination not in airport_choices:
-        default_destination = airport_choices[1] if len(airport_choices) > 1 else airport_choices[0]
 
 interface = gr.Interface(
     fn=predict_flight_delay,
     inputs=[
-        gr.Dropdown(
-            choices=airport_choices,
-            value=default_origin if airport_choices else "JFK",
-            allow_custom_value=True,
-            label="Origin Airport (full name, IATA, or ICAO)"
+        gr.Textbox(
+            value="JFK",
+            label="Origin Airport (type full name, IATA, or ICAO)"
         ),
-        gr.Dropdown(
-            choices=airport_choices,
-            value=default_destination if airport_choices else "MAD",
-            allow_custom_value=True,
-            label="Destination Airport (full name, IATA, or ICAO)"
+        gr.Textbox(
+            value="MAD",
+            label="Destination Airport (type full name, IATA, or ICAO)"
         ),
         gr.Textbox(
             value=today_utc_str,
@@ -783,16 +769,17 @@ interface = gr.Interface(
     title="AeroDelay AI - Flight Delay Predictor",
     description=(
         "Loads the saved model from your notebook, then enriches each prediction with live AirportDB, "
-        "OpenWeather, and Aviationstack data. You can select a full airport name or type an IATA/ICAO code."
+        "OpenWeather, and Aviationstack data. Type a full airport name, a 3-letter IATA code, or a 4-letter ICAO code."
     ),
     examples=[
-        ["John F Kennedy International Airport | IATA: JFK | ICAO: KJFK | New York, US", "Adolfo Suárez Madrid–Barajas Airport | IATA: MAD | ICAO: LEMD | Madrid, ES", today_utc_str, "14:30", ""],
+        ["JFK", "MAD", today_utc_str, "14:30", ""],
         ["JFK", "PEK", today_utc_str, "14:30", ""],
-        ["JFK", "PKX", today_utc_str, "14:30", ""],
+        ["JFK", "ZBBB", today_utc_str, "14:30", ""],
+        ["John F Kennedy International Airport", "Adolfo Suárez Madrid–Barajas Airport", today_utc_str, "14:30", ""],
         ["KJFK", "LEMD", today_utc_str, "24:00", ""],
         ["JFK", "LAX", today_utc_str, "14:30", "AA"]
     ],
     flagging_mode="never"
 )
 
-interface.launch(share=True)
+interface.launch(share=True, ssr_mode=False)
