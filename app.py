@@ -23,7 +23,11 @@ def run(origin, destination, date_str, time_str, carrier):
     P = []   # paragraphs, joined with a blank line so every field renders on its own line
     P.append(f"## {ICON[band]} Delay risk: {band} ({r['risk']*100:.1f}%)")
     P.append(f"**Delay risk:** {r['risk']*100:.1f}% chance of arriving more than 15 min late. Band: {band} ({rng}).")
-    P.append(f"**Typical-case delay estimate:** {max(r['minutes'],0):.1f} min (model average for flights like this; individual flights vary a lot)")
+    mins = r['minutes']
+    if mins <= 0:
+        P.append("**Typical-case delay estimate:** on time or early (the model's minutes estimate is zero or below for flights like this; individual flights vary a lot)")
+    else:
+        P.append(f"**Typical-case delay estimate:** {mins:.1f} min (model average for flights like this; individual flights vary a lot)")
     P.append(f"**Route:** {m['origin']} - {m['origin_name']} to {m['destination']} - {m['destination_name']} ({m['distance_km']:.0f} km, about {m['block_minutes']:.0f} min scheduled)")
     P.append(f"**Departure:** {m['dep_local'].strftime('%Y-%m-%d %H:%M')} local ({m['origin_tz']}), {m['dep_utc'].strftime('%Y-%m-%d %H:%M')} UTC")
     P.append(f"**Carrier:** {m['carrier']} ({m['carrier_source']})")
@@ -43,6 +47,6 @@ demo = gr.Interface(fn=run,
             gr.Textbox(value="DL", label="Airline code (optional, e.g. DL, AA, UA, WN)")],
     outputs=gr.Markdown(label="Prediction"), title="AeroDelay AI",
     description="Predicts delay risk for US domestic flights. Trained on 10 months of BTS on-time data with time-matched weather. Uses forecast weather for the chosen airport and time.",
-    examples=[["ATL", "LAX", datetime.now().strftime("%Y-%m-%d"), "14:25", "DL"], ["JFK", "MAD", datetime.now().strftime("%Y-%m-%d"), "14:30", ""]], flagging_mode="never")
+    examples=[["ATL", "LAX", datetime.now().strftime("%Y-%m-%d"), "14:25", "DL"], ["ATL", "LGA", datetime.now().strftime("%Y-%m-%d"), "20:30", "DL"]], flagging_mode="never")
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)), share=os.environ.get("GRADIO_SHARE") == "1")
