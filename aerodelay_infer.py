@@ -92,7 +92,7 @@ def _om(url, params, retries=2):
     for attempt in range(retries + 1):
         try:
             r = requests.get(url, params=params, timeout=25)
-            if r.status_code >= 500:
+            if r.status_code >= 500 or r.status_code == 429:
                 last = f"HTTP {r.status_code}"
             elif r.status_code != 200:
                 raise RuntimeError(f"HTTP {r.status_code}")
@@ -136,7 +136,7 @@ def get_weather(lat, lon, when_utc, A):
         s["wind_deg"] = df["wind_deg"].astype(float).median()
         return _fill(s, A), f"SEASONAL ANALOG: same date in {an.year} ({k} year{'s' if k > 1 else ''} back) +/-3 days averaged. NOT a forecast"
     except Exception as e:
-        pass
+        print(f"[weather] Open-Meteo path failed: {type(e).__name__}: {str(e)[:120]}", flush=True)
     key = os.environ.get("OPENWEATHER_API_KEY")
     if key and abs((hour - now).total_seconds()) < 86400 * 1.5:
         try:
