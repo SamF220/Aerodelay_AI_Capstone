@@ -1,0 +1,36 @@
+{
+  "source": "model_metrics table in aerodelay.db (written by AeroDelay_AI_retrain.ipynb); values from the capstone report Table 1 are listed under report_table_1",
+  "split": {
+    "train": "Oct 2025 - Apr 2026",
+    "validation": "May 2026",
+    "test": "Jun - Jul 2026",
+    "shipped_models_refit_on": "train + validation"
+  },
+  "model_metrics": {
+    "train_rows": 789304,
+    "test_rows": 210696,
+    "rf_mae": 29.221639957371675,
+    "rf_rmse": 67.62832499500455,
+    "baseline_median_mae": 29.7534077533508,
+    "baseline_mean_rmse": 69.28660070262401,
+    "clf_auc": 0.7228886792070777,
+    "clf_accuracy_tuned": 0.6696472643049702,
+    "clf_f1_tuned": 0.5088625458650861,
+    "clf_accuracy_0_5": 0.7467678551087823,
+    "clf_f1_0_5": 0.13644088370963825
+  },
+  "report_table_1": {
+    "rf_mae_minutes": 29.22,
+    "baseline_median_mae": 29.75,
+    "rf_rmse_minutes": 67.63,
+    "baseline_mean_rmse": 69.29,
+    "gb_auc": 0.723,
+    "gb_pr_auc": 0.475,
+    "test_delay_rate": 0.263,
+    "cutoff": 0.2,
+    "precision_at_cutoff": 0.417,
+    "recall_at_cutoff": 0.652,
+    "f1_at_cutoff": 0.509,
+    "logistic_regression_auc_oct_apr_only": 0.676
+  }
+}
