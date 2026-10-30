@@ -1,0 +1,7 @@
+{
+ "method": "platt",
+ "a": 1.2885083968866882,
+ "b": 0.36405213662575575,
+ "fit_on": "May 2026 validation month (105,160 flights), shipped classifier, no retraining",
+ "formula": "p_cal = 1/(1+exp(-(a*logit(p)+b)))"
+}

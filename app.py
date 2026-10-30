@@ -16,7 +16,7 @@ def wx_line(w, src):
 
 def run(origin, destination, date_str, time_str, carrier):
     try:
-        r = ai.predict(origin, destination, date_str, time_str, carrier, CTX, CTX["explainer"])
+        r = ai.predict(origin, destination, date_str, time_str, carrier, CTX, CTX["explainer"], risk_explainer=CTX["risk_explainer"])
     except Exception as e:
         return "**Could not predict:** " + str(e)[:200]
     m = r["meta"]; band, rng = r["band"]
@@ -35,10 +35,11 @@ def run(origin, destination, date_str, time_str, carrier):
     P.append("**Destination weather:** " + wx_line(m["weather_dest"], m["weather_dest_src"]))
     if "SEASONAL" in m["weather_origin_src"] or "SEASONAL" in m["weather_dest_src"]:
         P.append("> **Weather is a seasonal analog, not a forecast** (the date is beyond the 15-day forecast window).")
-    P.append(f"**Top factors** (SHAP: minutes added or removed from the model average of {r['shap_base']:.1f} min):" + NL + NL + NL.join(f"- **{row.feature}** = {row.value:.3g}: {row.shap_minutes:+.2f} min" for row in r["shap"].itertuples()))
+    P.append("**Why this risk** (SHAP on the risk model: what pushed this flight's delay risk up or down, in approximate percentage points):" + NL + NL + NL.join(f"- **{row.feature}** = {row.value:.3g}: {row.approx_pts:+.1f} pts" for row in r["risk_shap"].itertuples()))
+    P.append(f"**What drives the minutes estimate** (SHAP on the minutes model: minutes added or removed from its average of {r['shap_base']:.1f} min):" + NL + NL + NL.join(f"- **{row.feature}** = {row.value:.3g}: {row.shap_minutes:+.2f} min" for row in r["shap"].itertuples()))
     if m["warnings"]:
         P.append("**Warnings:**" + NL + NL + NL.join("- " + w for w in m["warnings"]))
-    P.append(f"*Held-out test (Jun-Jul 2026, US domestic): risk AUC {M['clf_test']['AUC']:.2f}; minutes MAE {M['rf_test']['MAE']:.1f} vs {M['base_median_test']['MAE']:.1f} for always guessing the median. Risk bands: LOW below 20%, ELEVATED 20-35%, HIGH 35% and up.*")
+    P.append(f"*Held-out test (Jun-Jul 2026, US domestic): risk AUC {M['clf_test']['AUC']:.2f}; minutes MAE {M['rf_test']['MAE']:.1f} vs {M['base_median_test']['MAE']:.1f} for always guessing the median. Risk is calibrated on the May 2026 validation month (Platt scaling). Risk bands: LOW below 20%, ELEVATED 20-35%, HIGH 35% and up.*")
     return (NL + NL).join(P)
 
 demo = gr.Interface(fn=run,

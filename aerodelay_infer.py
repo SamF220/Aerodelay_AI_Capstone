@@ -3,8 +3,9 @@
 Weather path for a prediction (all sources return the SAME schema/units as the training weather):
   1. Open-Meteo forecast API (ECMWF IFS, keyless) for -7 .. +15 days from today.   -> label "forecast"
   2. Open-Meteo archive API (same ECMWF IFS model) for older dates.                   -> label "historical"
-  3. Beyond the forecast window: same calendar date one year earlier (+/-3 days)
-     from the archive API, averaged by hour.                                          -> label "seasonal analog (NOT a forecast)"
+  3. Beyond the forecast window: same calendar date in an earlier year (+/-3 days) from the
+     archive API, averaged by hour. Starts one year back and keeps stepping back whole years
+     until that week is fully in the past (archive has a ~5-day lag).                 -> label "seasonal analog (NOT a forecast)"
   4. If Open-Meteo is unreachable: OpenWeather current weather, only if OPENWEATHER_API_KEY is set
      in the environment (key is never printed/logged).                                 -> label "OpenWeather current"
   5. Last resort: training medians.                                                    -> label "weather forecast unavailable, typical values used"
@@ -17,18 +18,21 @@ import numpy as np, pandas as pd, requests, joblib
 HERE = os.path.dirname(os.path.abspath(__file__))
 OM_VARS = "temperature_2m,apparent_temperature,surface_pressure,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,precipitation,cloud_cover"
 FORECAST_DAYS = 15
+ARCHIVE_LAG_DAYS = 5   # Open-Meteo archive is usually complete up to ~5 days ago
 
 def load(path=HERE):
     A = joblib.load(os.path.join(path, "aerodelay_artifacts.pkl"))
     rf = joblib.load(os.path.join(path, "aerodelay_rf_model.pkl"))
     clf = joblib.load(os.path.join(path, "aerodelay_log_model.pkl"))
+    cal_path = os.path.join(path, "calibration.json")
+    cal = json.load(open(cal_path)) if os.path.exists(cal_path) else None
     con = sqlite3.connect(os.path.join(path, "aerodelay.db"))
     airports = pd.read_sql("SELECT * FROM airport_master", con)
     fc = pd.read_sql("SELECT origin,destination,route,airline_id FROM flights_clean", con)
     con.close()
     for c in ("iata_code", "ident", "name"):
         airports[c + "_u"] = airports[c].astype(str).str.upper().str.strip()
-    return dict(A=A, rf=rf, clf=clf, airports=airports, flights=fc)
+    return dict(A=A, rf=rf, clf=clf, cal=cal, airports=airports, flights=fc)
 
 # ---------------------------------------------------------------- airports / time
 def resolve_airport(text, ctx):
@@ -119,14 +123,18 @@ def get_weather(lat, lon, when_utc, A):
             row = df[df.time == hour]
             if not row.empty and row[WX_COLS[:6]].notna().all(axis=1).iloc[0]:
                 return _fill(row.iloc[0], A), "historical (Open-Meteo archive)"
-        # beyond forecast window (or empty hour): seasonal analog
-        an = hour - pd.Timedelta(days=365)
+        # beyond forecast window (or empty hour): seasonal analog.
+        # Step back whole years until the +/-3 day analog week is fully in the archive (it lags ~5 days).
+        k = 1
+        while (hour - pd.DateOffset(years=k)) + pd.Timedelta(days=3) > now - pd.Timedelta(days=ARCHIVE_LAG_DAYS):
+            k += 1
+        an = hour - pd.DateOffset(years=k)
         df = _om("https://archive-api.open-meteo.com/v1/archive", {**base, "start_date": (an - pd.Timedelta(days=3)).strftime("%Y-%m-%d"), "end_date": (an + pd.Timedelta(days=3)).strftime("%Y-%m-%d")})
         df = df[df.time.dt.hour == hour.hour]
         if df.empty: raise RuntimeError("no analog data")
         s = df[WX_COLS].astype(float).mean()
         s["wind_deg"] = df["wind_deg"].astype(float).median()
-        return _fill(s, A), "SEASONAL ANALOG: same date last year +/-3 days averaged. NOT a forecast"
+        return _fill(s, A), f"SEASONAL ANALOG: same date in {an.year} ({k} year{'s' if k > 1 else ''} back) +/-3 days averaged. NOT a forecast"
     except Exception as e:
         pass
     key = os.environ.get("OPENWEATHER_API_KEY")
@@ -208,17 +216,34 @@ def _pod(h): return "morning" if 5 <= h < 12 else "afternoon" if 12 <= h < 17 el
 def band(p):
     return ("LOW", "<20%") if p < 0.20 else (("ELEVATED", "20-35%") if p < 0.35 else ("HIGH", ">=35%"))
 
-def predict(origin, destination, date_str, time_str, carrier, ctx, explainer=None, top_k=5):
+def calibrate(p, cal):
+    """Platt scaling fitted on the May 2026 validation month (no retraining): p_cal = sigmoid(a*logit(p)+b)."""
+    if not cal: return float(p)
+    p = min(max(float(p), 1e-6), 1 - 1e-6)
+    return float(1.0 / (1.0 + math.exp(-(cal["a"] * math.log(p / (1 - p)) + cal["b"]))))
+
+def _top(sv, X, col, top_k):
+    s = pd.DataFrame({"feature": X.columns, col: sv, "value": X.iloc[0].values}); s["abs"] = s[col].abs()
+    return s.sort_values("abs", ascending=False).head(top_k).drop(columns="abs").reset_index(drop=True)
+
+def predict(origin, destination, date_str, time_str, carrier, ctx, explainer=None, top_k=5, risk_explainer=None):
     X, meta = build_row(origin, destination, date_str, time_str, carrier, ctx)
-    minutes = float(ctx["rf"].predict(X)[0]); prob = float(ctx["clf"].predict_proba(X)[0][1])   # real classifier: no constant fallback
-    out = dict(minutes=minutes, risk=prob, band=band(prob), meta=meta, X=X)
+    minutes = float(ctx["rf"].predict(X)[0]); raw = float(ctx["clf"].predict_proba(X)[0][1])   # real classifier: no constant fallback
+    prob = calibrate(raw, ctx.get("cal"))
+    out = dict(minutes=minutes, risk=prob, risk_raw=raw, band=band(prob), meta=meta, X=X)
+    if risk_explainer is not None:
+        # SHAP on the gradient boosting risk classifier: contributions in log-odds of the (uncalibrated) delay risk.
+        sv = np.asarray(risk_explainer.shap_values(X)); sv = sv[1][0] if sv.ndim == 3 and sv.shape[0] == 2 else sv.reshape(len(X.columns), -1)[:, -1] if sv.ndim == 3 else sv[0]
+        t = _top(sv, X, "shap_logodds", top_k)
+        slope = (ctx["cal"]["a"] if ctx.get("cal") else 1.0) * prob * (1 - prob)   # d(calibrated risk)/d(raw log-odds)
+        t["approx_pts"] = t.shap_logodds * slope * 100      # local linear approximation, percentage points of the shown risk
+        out["risk_shap"] = t
+        out["risk_shap_base"] = float(np.ravel(risk_explainer.expected_value)[-1])
     if explainer is not None:
-        sv = explainer.shap_values(X)[0]
-        s = pd.DataFrame({"feature": X.columns, "shap_minutes": sv, "value": X.iloc[0].values}); s["abs"] = s.shap_minutes.abs()
-        out["shap"] = s.sort_values("abs", ascending=False).head(top_k).drop(columns="abs").reset_index(drop=True)
+        out["shap"] = _top(explainer.shap_values(X)[0], X, "shap_minutes", top_k)
         out["shap_base"] = float(np.ravel(explainer.expected_value)[0])
     return out
 
 def setup(path=HERE):
     import shap
-    ctx = load(path); ctx["E"] = joblib.load(os.path.join(path, "aerodelay_encoding_maps.pkl")); ctx["explainer"] = shap.TreeExplainer(ctx["rf"]); return ctx
+    ctx = load(path); ctx["E"] = joblib.load(os.path.join(path, "aerodelay_encoding_maps.pkl")); ctx["explainer"] = shap.TreeExplainer(ctx["rf"]); ctx["risk_explainer"] = shap.TreeExplainer(ctx["clf"]); return ctx
